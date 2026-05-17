@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Event Budget Calculator</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a1a;
+      min-height: 100vh;
+      padding: 1.5rem 1rem 3rem;
+    }
+
+    .app { max-width: 980px; margin: 0 auto; }
+
+    /* Help banner */
+    .help {
+      background: #e8f0fe;
+      border: 1px solid #c5d4f6;
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #333;
+    }
+    .help h1 { font-size: 16px; font-weight: 600; color: #185FA5; margin-bottom: 0.35rem; }
+    .help p  { margin-bottom: 0.5rem; }
+    .help ul { margin-left: 1.2rem; }
+    .help li { margin-bottom: 2px; }
+
+    /* Summary metric cards */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 1.25rem;
+    }
+    .metric-card { background: #fff; border: 0.5px solid #e0e0e0; border-radius: 8px; padding: 0.75rem 1rem; }
+    .metric-label { font-size: 11px; color: #666; margin-bottom: 4px; }
+    .metric-value { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      gap: 2px;
+      border-bottom: 1.5px solid #d8d8d8;
+      margin-bottom: 1rem;
+    }
+    .tab-btn {
+      padding: 7px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: #666;
+      border-bottom: 2.5px solid transparent;
+      margin-bottom: -1.5px;
+      border-radius: 4px 4px 0 0;
+      transition: color 0.1s;
+      font-family: inherit;
+    }
+    .tab-btn:hover  { color: #185FA5; background: #f5f7ff; }
+    .tab-btn.active { color: #185FA5; border-bottom-color: #185FA5; }
+
+    /* Cards */
+    .card {
+      background: #fff;
+      border: 0.5px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 1rem 1.125rem;
+    }
+    .card + .card { margin-top: 14px; }
+
+    /* Section label */
+    .sec-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.07em;
+      color: #888;
+      text-transform: uppercase;
+      margin-bottom: 0.875rem;
+    }
+
+    /* Two-column layout for revenue/costs */
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    /* Form inputs */
+    input[type="text"],
+    input[type="number"] {
+      border: 1px solid #d0d0d0;
+      border-radius: 5px;
+      padding: 4px 8px;
+      font-size: 13px;
+      font-family: inherit;
+      background: #fff;
+      color: #1a1a1a;
+    }
+    input[type="text"]:focus,
+    input[type="number"]:focus { outline: 2px solid #185FA5; outline-offset: 1px; }
+
+    /* Buttons */
+    button {
+      border: 1px solid #d0d0d0;
+      border-radius: 5px;
+      background: #f5f5f5;
+      color: #333;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.1s;
+    }
+    button:hover { background: #e8e8e8; }
+
+    /* Progress bar */
+    .bar-track { height: 8px; background: #e8e8e8; border-radius: 4px; overflow: hidden; }
+    .bar-fill  { height: 100%; border-radius: 4px; transition: width 0.15s ease; }
+
+    /* Variable-cost info box inside Costs tab */
+    .var-box {
+      background: #f5f5f5;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+    }
+
+    /* Row with inputs + delete button */
+    .row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+
+    /* Scrollable fixed-cost list */
+    .scroll { max-height: 280px; overflow-y: auto; }
+
+    /* Settings grid for ticket types */
+    .ticket-row {
+      display: grid;
+      grid-template-columns: 1fr 84px 84px 84px 28px;
+      gap: 6px;
+      margin-bottom: 8px;
+      align-items: end;
+    }
+    .field-lbl { font-size: 10px; color: #999; margin-bottom: 3px; }
+
+    @media (max-width: 640px) {
+      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+      .two-col { grid-template-columns: 1fr; }
+      .ticket-row { grid-template-columns: 1fr 72px 72px 28px; }
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const { useState } = React;
+
+  // Format as Swedish kroner: 12500 → "12 500 kr"
+  const fmtSEK = (n) =>
+    new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(Math.round(n)) + " kr";
+
+  const GREEN = "#3B6D11";
+  const RED   = "#993C1D";
+  const BLUE  = "#185FA5";
+  const AMBER = "#854F0B";
+
+  // ── Default state ──────────────────────────────────────────────────────────
+  // All amounts start at 0. Rename ticket types and fill in real numbers in
+  // the Inställningar tab before sharing with your team.
+
+  const initTicketTypes = [
+    { id: 1, name: "Standard", price: 0, varCost: 0, count: 0, sliderMax: 500 },
+    { id: 2, name: "Premium",  price: 0, varCost: 0, count: 0, sliderMax: 200 },
+  ];
+
+  // Example fixed-cost rows with 0 amounts — edit or delete as needed
+  const initFixed = [
+    { id: 1, name: "Venue rental",    amount: 0 },
+    { id: 2, name: "Equipment",       amount: 0 },
+    { id: 3, name: "Marketing",       amount: 0 },
+  ];
+
+  // ── Helper components ──────────────────────────────────────────────────────
+
+  function ProgressBar({ pct, color }) {
+    return (
+      <div className="bar-track">
+        <div className="bar-fill" style={{ width: `${Math.min(pct, 100)}%`, background: color }} />
+      </div>
+    );
+  }
+
+  function MetricCard({ label, value, color }) {
+    return (
+      <div className="metric-card">
+        <div className="metric-label">{label}</div>
+        <div className="metric-value" style={{ color }}>{value}</div>
+      </div>
+    );
+  }
+
+  // ── Main app ───────────────────────────────────────────────────────────────
+
+  function App() {
+    const [tab,           setTab]           = useState("revenue");
+    const [ticketTypes,   setTicketTypes]   = useState(initTicketTypes);
+    const [sponsors,      setSponsors]      = useState(0);
+    const [extraRev,      setExtraRev]      = useState([]);
+    const [fixed,         setFixed]         = useState(initFixed);
+    const [targetTickets, setTargetTickets] = useState(100);
+    const [targetSponsor, setTargetSponsor] = useState(0);
+    const [nextId,        setNextId]        = useState(100);
+
+    // ── Core calculations ────────────────────────────────────────────────────
+
+    // Total revenue from all ticket types
+    const totalTicketRev = ticketTypes.reduce((s, t) => s + t.count * t.price, 0);
+    const extraTotal     = extraRev.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    const totalRev       = totalTicketRev + sponsors + extraTotal;
+
+    const totalFixed     = fixed.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+
+    // Variable cost: each ticket type carries its own per-ticket cost (e.g. seat, goody bag)
+    const totalVar       = ticketTypes.reduce((s, t) => s + t.count * t.varCost, 0);
+    const totalCosts     = totalFixed + totalVar;
+    const result         = totalRev - totalCosts;
+    const totalTickets   = ticketTypes.reduce((s, t) => s + t.count, 0);
+
+    // Weighted-average revenue per ticket based on actual sales mix.
+    // Falls back to simple mean when no tickets are entered yet.
+    const avgRev = totalTickets > 0
+      ? totalTicketRev / totalTickets
+      : ticketTypes.reduce((s, t) => s + t.price, 0) / (ticketTypes.length || 1);
+
+    // Weighted-average variable cost per ticket (same weighting logic)
+    const avgVar = totalTickets > 0
+      ? totalVar / totalTickets
+      : ticketTypes.reduce((s, t) => s + t.varCost, 0) / (ticketTypes.length || 1);
+
+    // Contribution margin: the amount each ticket contributes toward covering fixed costs.
+    // Once margin × tickets_sold ≥ fixedCosts the event is profitable.
+    const marginPerTicket = avgRev - avgVar;
+
+    // Break-even WITH sponsor income: treat sponsor money as a fixed-cost offset.
+    // Formula: (fixedCosts − sponsorIncome) / contributionMarginPerTicket
+    const breakevenWith = marginPerTicket > 0
+      ? Math.ceil((totalFixed - sponsors) / marginPerTicket)
+      : null;
+
+    // Break-even WITHOUT sponsor income: how many tickets alone cover all fixed costs
+    const breakevenNo = marginPerTicket > 0
+      ? Math.ceil(totalFixed / marginPerTicket)
+      : null;
+
+    // Sponsor income needed to break even at the target ticket count.
+    // Derived by solving: fixedCosts + target×avgVar − target×avgRev − sponsorNeeded = 0
+    const sponsorNeeded = Math.max(
+      0,
+      totalFixed + targetTickets * avgVar - targetTickets * avgRev,
+    );
+
+    // ── State mutation helpers ───────────────────────────────────────────────
+
+    const numFields = new Set(["count", "price", "varCost", "sliderMax", "amount"]);
+
+    const updTicket = (id, field, val) =>
+      setTicketTypes((ts) =>
+        ts.map((t) =>
+          t.id === id ? { ...t, [field]: numFields.has(field) ? parseFloat(val) || 0 : val } : t,
+        ),
+      );
+
+    const delTicket = (id) => setTicketTypes((ts) => ts.filter((t) => t.id !== id));
+
+    const addTicket = () => {
+      setTicketTypes((ts) => [
+        ...ts,
+        { id: nextId, name: "New type", price: 0, varCost: 0, count: 0, sliderMax: 200 },
+      ]);
+      setNextId((n) => n + 1);
+    };
+
+    const updFixed = (id, field, val) =>
+      setFixed((cs) =>
+        cs.map((c) =>
+          c.id === id ? { ...c, [field]: field === "amount" ? parseFloat(val) || 0 : val } : c,
+        ),
+      );
+
+    const delFixed = (id) => setFixed((cs) => cs.filter((c) => c.id !== id));
+
+    const addFixed = () => {
+      setFixed((cs) => [...cs, { id: nextId, name: "New cost", amount: 0 }]);
+      setNextId((n) => n + 1);
+    };
+
+    const updExtra = (id, field, val) =>
+      setExtraRev((r) =>
+        r.map((e) =>
+          e.id === id ? { ...e, [field]: field === "amount" ? parseFloat(val) || 0 : val } : e,
+        ),
+      );
+
+    const delExtra = (id) => setExtraRev((r) => r.filter((e) => e.id !== id));
+
+    const addExtra = () => {
+      setExtraRev((r) => [...r, { id: nextId, name: "Extra revenue", amount: 0 }]);
+      setNextId((n) => n + 1);
+    };
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    return (
+      <div className="app">
+
+        {/* ── Help banner ────────────────────────────────────────────────── */}
+        <div className="help">
+          <h1>Event Budget Calculator</h1>
+          <p>
+            A real-time budget planning tool for LAN parties and similar ticketed events.
+            Adjust numbers in any tab and the break-even analysis updates instantly.
+          </p>
+          <ul>
+            <li><strong>Intäkter</strong> — Set ticket counts via sliders, enter sponsor income, and add any extra revenue lines.</li>
+            <li><strong>Kostnader</strong> — Enter fixed overhead costs. Variable costs per ticket are configured in Inställningar.</li>
+            <li><strong>Rapport</strong> — See break-even ticket count, contribution margin, and goal progress bars.</li>
+            <li><strong>Inställningar</strong> — Rename ticket types, set prices and per-ticket variable costs, and adjust planning targets.</li>
+          </ul>
+        </div>
+
+        {/* ── Summary row (always visible) ───────────────────────────────── */}
+        <div className="metrics-grid">
+          <MetricCard label="Totala intäkter"  value={fmtSEK(totalRev)}   color={GREEN} />
+          <MetricCard label="Totala kostnader" value={fmtSEK(totalCosts)} color={RED}   />
+          <MetricCard label="Biljetter"        value={`${totalTickets} / ${targetTickets}`} color={BLUE} />
+          <MetricCard label="Resultat"         value={fmtSEK(result)}     color={result >= 0 ? GREEN : RED} />
+        </div>
+
+        {/* ── Tab bar ────────────────────────────────────────────────────── */}
+        <div className="tab-bar">
+          {[
+            { id: "revenue",  label: "Intäkter"       },
+            { id: "costs",    label: "Kostnader"      },
+            { id: "report",   label: "Rapport"        },
+            { id: "settings", label: "Inställningar"  },
+          ].map((t) => (
+            <button
+              key={t.id}
+              className={`tab-btn${tab === t.id ? " active" : ""}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Intäkter ───────────────────────────────────────────────────── */}
+        {tab === "revenue" && (
+          <div className="card">
+            <div className="sec-label">Intäkter</div>
+
+            {/* One slider row per ticket type */}
+            {ticketTypes.map((t) => (
+              <div key={t.id} style={{ marginBottom: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+                  <span style={{ color: "#555" }}>{t.name} — {fmtSEK(t.price)}/st</span>
+                  <span style={{ color: GREEN, fontVariantNumeric: "tabular-nums" }}>{fmtSEK(t.count * t.price)}</span>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    type="range" min={0} max={t.sliderMax} step={1} value={t.count}
+                    onChange={(e) => updTicket(t.id, "count", e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <input
+                    type="number" min={0} value={t.count}
+                    onChange={(e) => updTicket(t.id, "count", e.target.value)}
+                    style={{ width: 58, textAlign: "center" }}
+                  />
+                </div>
+              </div>
+            ))}
+
+            {/* Sponsor income */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+                <span style={{ color: "#555" }}>Sponsorintäkter</span>
+                <span style={{ color: GREEN, fontVariantNumeric: "tabular-nums" }}>{fmtSEK(sponsors)}</span>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="range" min={0} max={Math.max(targetSponsor * 2 || 100000, 100000)} step={500}
+                  value={sponsors}
+                  onChange={(e) => setSponsors(+e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <input
+                  type="number" min={0} value={sponsors}
+                  onChange={(e) => setSponsors(+e.target.value)}
+                  style={{ width: 90, textAlign: "right" }}
+                />
+              </div>
+            </div>
+
+            {/* Additional revenue lines */}
+            {extraRev.map((e) => (
+              <div key={e.id} className="row">
+                <input
+                  value={e.name}
+                  onChange={(ev) => updExtra(e.id, "name", ev.target.value)}
+                  placeholder="Benämning"
+                  style={{ flex: 1 }}
+                />
+                <input
+                  type="number" value={e.amount}
+                  onChange={(ev) => updExtra(e.id, "amount", ev.target.value)}
+                  style={{ width: 90, textAlign: "right" }}
+                />
+                <button onClick={() => delExtra(e.id)} aria-label="Ta bort" style={{ padding: "2px 7px" }}>×</button>
+              </div>
+            ))}
+            <button onClick={addExtra} style={{ fontSize: 12, padding: "4px 10px", marginTop: 4 }}>
+              + Lägg till intäkt
+            </button>
+          </div>
+        )}
+
+        {/* ── Kostnader ──────────────────────────────────────────────────── */}
+        {tab === "costs" && (
+          <div className="card">
+            <div className="sec-label">Kostnader</div>
+
+            {/* Variable costs are set per ticket type in Inställningar */}
+            <div className="var-box">
+              <div style={{ fontSize: 12, fontWeight: 500, color: "#555", marginBottom: 8 }}>
+                Rörlig kostnad per biljett — konfigurera i Inställningar
+              </div>
+              {ticketTypes.map((t) => (
+                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#444", marginBottom: 3 }}>
+                  <span>{t.name}: {fmtSEK(t.varCost)}/st × {t.count}</span>
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>{fmtSEK(t.count * t.varCost)}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 11, color: "#999", marginTop: 8, borderTop: "0.5px solid #ddd", paddingTop: 6 }}>
+                Totalt rörligt: <strong>{fmtSEK(totalVar)}</strong> för {totalTickets} biljetter
+              </div>
+            </div>
+
+            {/* Fixed cost list */}
+            <div className="scroll">
+              {fixed.map((c) => (
+                <div key={c.id} className="row">
+                  <input
+                    value={c.name}
+                    onChange={(e) => updFixed(c.id, "name", e.target.value)}
+                    style={{ flex: 1, fontSize: 12 }}
+                  />
+                  <input
+                    type="number" value={c.amount}
+                    onChange={(e) => updFixed(c.id, "amount", e.target.value)}
+                    style={{ width: 90, textAlign: "right", fontSize: 12 }}
+                  />
+                  <button onClick={() => delFixed(c.id)} aria-label="Ta bort" style={{ padding: "2px 5px", fontSize: 11 }}>×</button>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ borderTop: "0.5px solid #e8e8e8", paddingTop: 8, marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <button onClick={addFixed} style={{ fontSize: 12, padding: "4px 10px" }}>
+                + Lägg till fast kostnad
+              </button>
+              <span style={{ fontSize: 12, fontWeight: 500, color: RED, fontVariantNumeric: "tabular-nums" }}>
+                Fast totalt: {fmtSEK(totalFixed)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ── Rapport ────────────────────────────────────────────────────── */}
+        {tab === "report" && (
+          <div className="card">
+            <div className="sec-label">Nollpunkt &amp; mål</div>
+
+            <div className="metrics-grid" style={{ marginBottom: "1.125rem" }}>
+              {/* Break-even including sponsor income as a fixed-cost offset */}
+              <MetricCard
+                label={`Nollpunkt med ${fmtSEK(sponsors)} sponsor`}
+                value={
+                  breakevenWith === null ? "—" :
+                  breakevenWith <= 0    ? "Redan lönsamt!" :
+                  `${breakevenWith} biljetter`
+                }
+                color={breakevenWith !== null && breakevenWith <= targetTickets ? GREEN : RED}
+              />
+              {/* Break-even without any sponsor income */}
+              <MetricCard
+                label="Nollpunkt utan sponsor"
+                value={breakevenNo !== null ? `${breakevenNo} biljetter` : "—"}
+                color="#333"
+              />
+              {/* How much each average ticket contributes toward fixed costs */}
+              <MetricCard
+                label="Bidragsmarginalen / biljett"
+                value={fmtSEK(marginPerTicket)}
+                color={marginPerTicket > 0 ? GREEN : RED}
+              />
+              {/* Sponsor income required if targeting exactly targetTickets tickets */}
+              <MetricCard
+                label={`Sponsor för nollpunkt vid ${targetTickets} biljetter`}
+                value={sponsorNeeded <= 0 ? "Inget krävs!" : fmtSEK(sponsorNeeded)}
+                color={sponsors >= sponsorNeeded ? GREEN : AMBER}
+              />
+            </div>
+
+            {/* Progress bars toward planning targets */}
+            {[
+              {
+                label:  "Biljetter mot mål",
+                detail: `${totalTickets} / ${targetTickets}`,
+                pct:    Math.round((totalTickets / Math.max(targetTickets, 1)) * 100),
+                color:  BLUE,
+              },
+              {
+                label:  "Sponsor mot mål",
+                detail: `${fmtSEK(sponsors)} / ${fmtSEK(targetSponsor)}`,
+                pct:    Math.round((sponsors / Math.max(targetSponsor, 1)) * 100),
+                color:  GREEN,
+              },
+              {
+                label:  "Intäkter / kostnader",
+                detail: `${Math.round((totalRev / Math.max(totalCosts, 1)) * 100)}% täckt`,
+                pct:    Math.round((totalRev / Math.max(totalCosts, 1)) * 100),
+                color:  result >= 0 ? GREEN : RED,
+              },
+            ].map((p) => (
+              <div key={p.label} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#666", marginBottom: 4 }}>
+                  <span>{p.label}</span>
+                  <span>{p.detail}</span>
+                </div>
+                <ProgressBar pct={p.pct} color={p.color} />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── Inställningar ──────────────────────────────────────────────── */}
+        {tab === "settings" && (
+          <div>
+            {/* Ticket type configuration */}
+            <div className="card">
+              <div className="sec-label">Biljetttyper</div>
+              <p style={{ fontSize: 12, color: "#666", marginBottom: 12, lineHeight: 1.5 }}>
+                Rename ticket types and set their price, per-ticket variable cost (e.g. seat rental,
+                goody bag), and the maximum value shown on the count slider.
+              </p>
+
+              {/* Column headers */}
+              <div className="ticket-row" style={{ marginBottom: 4 }}>
+                <div className="field-lbl">Name</div>
+                <div className="field-lbl">Price (kr)</div>
+                <div className="field-lbl">Var. cost (kr)</div>
+                <div className="field-lbl">Slider max</div>
+                <div />
+              </div>
+
+              {ticketTypes.map((t) => (
+                <div key={t.id} className="ticket-row">
+                  <input
+                    value={t.name}
+                    onChange={(e) => updTicket(t.id, "name", e.target.value)}
+                    placeholder="Type name"
+                    style={{ fontSize: 12, width: "100%" }}
+                  />
+                  <input
+                    type="number" min={0} value={t.price}
+                    onChange={(e) => updTicket(t.id, "price", e.target.value)}
+                    style={{ width: "100%", textAlign: "right", fontSize: 12 }}
+                  />
+                  <input
+                    type="number" min={0} value={t.varCost}
+                    onChange={(e) => updTicket(t.id, "varCost", e.target.value)}
+                    style={{ width: "100%", textAlign: "right", fontSize: 12 }}
+                  />
+                  <input
+                    type="number" min={1} value={t.sliderMax}
+                    onChange={(e) => updTicket(t.id, "sliderMax", e.target.value)}
+                    style={{ width: "100%", textAlign: "right", fontSize: 12 }}
+                  />
+                  <button
+                    onClick={() => delTicket(t.id)}
+                    aria-label="Remove ticket type"
+                    style={{ padding: "3px 6px", fontSize: 12 }}
+                  >×</button>
+                </div>
+              ))}
+
+              <button onClick={addTicket} style={{ fontSize: 12, padding: "4px 10px", marginTop: 6 }}>
+                + Add ticket type
+              </button>
+            </div>
+
+            {/* Planning targets */}
+            <div className="card">
+              <div className="sec-label">Planeringsmål</div>
+              <p style={{ fontSize: 12, color: "#666", marginBottom: 12, lineHeight: 1.5 }}>
+                Targets used by the Rapport tab progress bars and the "sponsor needed at X tickets"
+                metric.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>Target ticket count</div>
+                  <input
+                    type="number" min={0} value={targetTickets}
+                    onChange={(e) => setTargetTickets(+e.target.value)}
+                    style={{ width: "100%", fontSize: 13 }}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>Target sponsor income (kr)</div>
+                  <input
+                    type="number" min={0} value={targetSponsor}
+                    onChange={(e) => setTargetSponsor(+e.target.value)}
+                    style={{ width: "100%", textAlign: "right", fontSize: 13 }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
