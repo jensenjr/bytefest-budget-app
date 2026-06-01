@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Event Budget Calculator</title>
+  <title>Event-budgetizer</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -208,7 +208,8 @@
   // the React app calls them from its toolbar handlers.
   // ════════════════════════════════════════════════════════════════════════════
 
-  const APP_VERSION = "1.0";
+  const APP_VERSION = "0.1.0";                       // early development — see CHANGELOG.md
+  const STORAGE_KEY = "event-budgetizer:draft:v1";   // in-browser draft (survives a page refresh)
   const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
   // Google Drive config — these are PUBLIC values (not secrets). Paste yours here.
@@ -254,9 +255,10 @@
     const nextId = (ids.length ? Math.max.apply(null, ids) : 0) + 1;
 
     return {
-      eventName:   settings.eventName == null ? "" : String(settings.eventName),
-      unitGoal:    toNum(settings.unitGoal),
-      revenueGoal: toNum(settings.revenueGoal),
+      eventName:        settings.eventName == null ? "" : String(settings.eventName),
+      unitGoal:         toNum(settings.unitGoal),
+      revenueGoal:      toNum(settings.revenueGoal),
+      sliderMaxSetting: toNum(settings.sliderMax),
       incomePosts, costPosts, nextId,
     };
   }
@@ -277,6 +279,7 @@
       ["eventName",   s.eventName],
       ["unitGoal",    s.unitGoal],
       ["revenueGoal", s.revenueGoal],
+      ["sliderMax",   s.sliderMaxSetting || 0],
       ["nextId",      s.nextId],
       ["savedAt",     new Date().toISOString()],
       ["appVersion",  APP_VERSION],
@@ -492,6 +495,7 @@
     const [eventName,   setEventName]   = useState("");
     const [unitGoal,    setUnitGoal]    = useState(0);
     const [revenueGoal, setRevenueGoal] = useState(0);
+    const [sliderMaxSetting, setSliderMaxSetting] = useState(0); // 0 = auto
     const [nextId,      setNextId]      = useState(1);
 
     // Income post: { id, name, type: "fixed"|"per-unit", amount, quantity }
@@ -513,7 +517,8 @@
     const [dirty,       setDirty]       = useState(false);
     const [savedAt,     setSavedAt]     = useState(null);
     const [menu,        setMenu]        = useState(null);   // null | 'open' | 'saveas'
-    const skipDirty = useRef(true);                          // skip the first dirty-effect run / after a load
+    const [hydrated,    setHydrated]    = useState(false);  // browser draft restored yet?
+    const skipDirty = useRef(true);                          // skip the dirty-effect run after a load / restore
 
     // ── Derived calculations ─────────────────────────────────────────────────
 
@@ -597,8 +602,10 @@
 
     const totalUnitsSold = perUnitIncome.reduce((s, p) => s + (p.quantity || 0), 0);
 
-    // Slider max = 1.5× unit goal, or 500 if no goal is set
-    const sliderMax = Math.max(unitGoal > 0 ? Math.ceil(unitGoal * 1.5) : 500, 100);
+    // Slider max: an explicit setting wins; otherwise 1.5× unit goal, or 500 if no goal.
+    const sliderMax = sliderMaxSetting > 0
+      ? sliderMaxSetting
+      : Math.max(unitGoal > 0 ? Math.ceil(unitGoal * 1.5) : 500, 100);
 
     // ── Mutations ─────────────────────────────────────────────────────────────
 
@@ -649,7 +656,7 @@
 
     // Everything we persist, including computed totals for the Summary tab.
     const collectState = () => ({
-      eventName, unitGoal, revenueGoal, nextId, incomePosts, costPosts,
+      eventName, unitGoal, revenueGoal, sliderMaxSetting, nextId, incomePosts, costPosts,
       summary: {
         totalRevenue, totalFixedIncome, totalUnitIncome,
         totalCosts, totalFixedCosts, totalUnitCosts,
@@ -664,14 +671,21 @@
       setEventName(s.eventName);
       setUnitGoal(s.unitGoal);
       setRevenueGoal(s.revenueGoal);
+      setSliderMaxSetting(s.sliderMaxSetting || 0);
       setIncomePosts(s.incomePosts);
       setCostPosts(s.costPosts);
       setNextId(s.nextId);
       setDirty(false);
     };
 
-    const fileBaseName = () =>
-      ((eventName || "budget").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_") || "budget") + ".xlsx";
+    // New files get a unique, timestamped name so nothing is silently overwritten:
+    //   <namn>_YYYY-MM-DD_HH-mm.xlsx   (e.g. budget_2026-06-02_14-30.xlsx)
+    const fileBaseName = () => {
+      const base = (eventName || "budget").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_") || "budget";
+      const d = new Date(), p = (n) => String(n).padStart(2, "0");
+      const stamp = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "_" + p(d.getHours()) + "-" + p(d.getMinutes());
+      return base + "_" + stamp + ".xlsx";
+    };
 
     const fail = (e) => { console.error(e); setErrMsg((e && e.message) ? e.message : String(e)); setStatus("error"); };
     const cancelled = (e) => e && (e.name === "AbortError" || e.code === 20);
@@ -722,24 +736,56 @@
     const onNew = () => {
       setMenu(null);
       if (dirty && !window.confirm("Du har osparade ändringar. Skapa en ny budget ändå?")) return;
-      applyState({ eventName: "", unitGoal: 0, revenueGoal: 0, incomePosts: [], costPosts: [], nextId: 1 });
+      applyState({ eventName: "", unitGoal: 0, revenueGoal: 0, sliderMaxSetting: 0, incomePosts: [], costPosts: [], nextId: 1 });
       setCurrentFile(null);
       setSavedAt(null);
       setStatus("idle");
     };
 
-    // Mark unsaved whenever the budget changes (skipped right after a load / new).
+    // Restore the in-browser draft on first load, so a refresh never loses work.
     useEffect(() => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const d = JSON.parse(raw);
+          skipDirty.current = true;
+          setEventName(d.eventName || "");
+          setUnitGoal(d.unitGoal || 0);
+          setRevenueGoal(d.revenueGoal || 0);
+          setSliderMaxSetting(d.sliderMaxSetting || 0);
+          setIncomePosts(Array.isArray(d.incomePosts) ? d.incomePosts : []);
+          setCostPosts(Array.isArray(d.costPosts) ? d.costPosts : []);
+          setNextId(d.nextId || 1);
+          setCurrentFile(d.currentFile || null);
+          setSavedAt(d.savedAt ? new Date(d.savedAt) : null);
+          setDirty(!!d.dirty);
+        }
+      } catch (e) { console.warn("Kunde inte återställa utkast:", e); }
+      setHydrated(true);
+    }, []);
+
+    // Persist the working draft to the browser on every change (survives refresh).
+    // The .xlsx file is still the durable copy you Save/Open explicitly.
+    useEffect(() => {
+      if (!hydrated) return;
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          v: APP_VERSION, eventName, unitGoal, revenueGoal, sliderMaxSetting, nextId,
+          incomePosts, costPosts, dirty,
+          savedAt: savedAt ? savedAt.toISOString() : null,
+          currentFile: currentFile
+            ? { provider: currentFile.provider, name: currentFile.name, fileId: currentFile.fileId || null }
+            : null,
+        }));
+      } catch (e) { /* storage full or unavailable — ignore */ }
+    }, [hydrated, eventName, unitGoal, revenueGoal, sliderMaxSetting, nextId, incomePosts, costPosts, dirty, savedAt, currentFile]);
+
+    // Mark unsaved whenever the budget changes (skipped during hydration and right after a load / new).
+    useEffect(() => {
+      if (!hydrated) return;
       if (skipDirty.current) { skipDirty.current = false; return; }
       setDirty(true);
-    }, [incomePosts, costPosts, eventName, unitGoal, revenueGoal]);
-
-    // Warn before leaving with unsaved changes.
-    useEffect(() => {
-      const h = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } };
-      window.addEventListener("beforeunload", h);
-      return () => window.removeEventListener("beforeunload", h);
-    }, [dirty]);
+    }, [hydrated, incomePosts, costPosts, eventName, unitGoal, revenueGoal, sliderMaxSetting]);
 
     // Close the toolbar dropdown when clicking elsewhere.
     useEffect(() => {
@@ -808,12 +854,12 @@
 
         {/* ── Help banner ────────────────────────────────────────────────── */}
         <div className="help">
-          <h1>{eventName || "Event Budget Calculator"}</h1>
+          <h1>{eventName || "Event-budgetizer"}</h1>
           <p>
-            Add income and cost posts below. Each post is either <strong>Fast</strong> (a fixed amount regardless of
-            units sold) or <strong>Per enhet</strong> (amount × quantity). Per-unit cost posts can be linked to a
-            per-unit income post to automatically mirror its quantity — useful for costs that follow ticket sales.
-            The <em>Rapport</em> tab shows a real-time break-even analysis.
+            Lägg till intäkts- och kostnadsposter nedan. Varje post är antingen <strong>Fast</strong> (ett fast
+            belopp oavsett antal sålda enheter) eller <strong>Per enhet</strong> (belopp × antal). Kostnadsposter
+            av typen per enhet kan kopplas till en intäktspost för att automatiskt följa dess antal — praktiskt för
+            kostnader som följer biljettförsäljningen. Fliken <em>Rapport</em> visar en nollpunktsanalys i realtid.
           </p>
         </div>
 
@@ -1186,6 +1232,16 @@
               </div>
             </div>
 
+            <div className="sec-label">Reglage</div>
+            <div className="field" style={{ marginBottom: "1rem" }}>
+              <label>Max för antals-reglaget (0 = automatiskt)</label>
+              <input
+                type="number" min={0}
+                value={sliderMaxSetting}
+                onChange={e => setSliderMaxSetting(+e.target.value)}
+              />
+            </div>
+
             <div className="hint">
               <strong>Hur break-even beräknas</strong><br />
               Fasta kostnader som inte täcks av fasta intäkter (t.ex. sponsring) kallas
@@ -1195,6 +1251,11 @@
             </div>
           </div>
         )}
+
+        {/* ── Version footer ─────────────────────────────────────────────── */}
+        <div style={{ textAlign: "center", fontSize: 11, color: "#aaa", marginTop: "1.5rem" }}>
+          Event-budgetizer · v{APP_VERSION} (tidig version)
+        </div>
 
       </div>
     );

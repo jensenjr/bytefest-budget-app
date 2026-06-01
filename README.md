@@ -1,4 +1,7 @@
-# Event Budget Calculator
+# Event-budgetizer
+
+> ⚠️ **Early development — v0.1.0.** See the [changelog](CHANGELOG.md); things may change between versions.
+> The app UI is in Swedish for now (an English version is planned).
 
 A single-HTML budget planning tool for LAN parties and similar ticketed events.
 
