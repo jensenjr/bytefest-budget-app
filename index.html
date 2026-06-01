@@ -7,6 +7,11 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- SheetJS — read/write the .xlsx file. Loaded synchronously so XLSX exists before the app compiles. -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <!-- Google Drive: Identity Services (sign-in) + Google API client (Picker). Load async. -->
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <script src="https://apis.google.com/js/api.js" async></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -150,12 +155,43 @@
       .post-row { flex-wrap: wrap; }
       .post-total { min-width: 70px; }
     }
+
+    /* ── Toolbar (open / save the .xlsx) ─────────────────────────────────── */
+    .toolbar {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 12px; flex-wrap: wrap;
+      background: #fff; border: 0.5px solid #e0e0e0; border-radius: 10px;
+      padding: 8px 12px; margin-bottom: 1rem;
+    }
+    .toolbar-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .toolbar-actions > button, .menu-wrap > button { padding: 6px 12px; font-size: 13px; }
+    .menu-wrap { position: relative; display: inline-block; }
+    .menu {
+      position: absolute; top: calc(100% + 4px); left: 0; z-index: 30;
+      background: #fff; border: 1px solid #d0d0d0; border-radius: 8px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.12); min-width: 190px; overflow: hidden;
+    }
+    .menu button {
+      display: block; width: 100%; text-align: left; border: none; border-radius: 0;
+      background: #fff; padding: 9px 14px; font-size: 13px;
+    }
+    .menu button:hover { background: #f0f4ff; color: #185FA5; }
+    .status-pill {
+      font-size: 12px; padding: 5px 12px; border-radius: 999px;
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 60%;
+    }
+    .status-pill.ok    { background: #eef7e9; color: #3B6D11; }
+    .status-pill.dirty { background: #fdf3e3; color: #854F0B; }
+    .status-pill.busy  { background: #e8f0fe; color: #185FA5; }
+    .status-pill.err   { background: #fbeae5; color: #993C1D; }
+    .status-pill.idle  { background: #f0f2f5; color: #888;    }
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-  const { useState } = React;
+  const { useState, useEffect, useRef } = React;
 
   // Format as Swedish kroner: 12500 → "12 500 kr"
   const fmtSEK = (n) =>
@@ -165,6 +201,255 @@
   const RED   = "#993C1D";
   const BLUE  = "#185FA5";
   const AMBER = "#854F0B";
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Persistence — the budget lives in a real .xlsx file (draw.io-style), opened
+  // and saved either on this computer or in Google Drive. These are plain helpers;
+  // the React app calls them from its toolbar handlers.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  const APP_VERSION = "1.0";
+  const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+  // Google Drive config — these are PUBLIC values (not secrets). Paste yours here.
+  // See README → "Connect Google Drive". Restrict the API key by HTTP referrer.
+  const GOOGLE_CLIENT_ID = "PASTE_YOUR_CLIENT_ID.apps.googleusercontent.com";
+  const GOOGLE_API_KEY   = "PASTE_YOUR_API_KEY";
+  const DRIVE_SCOPE      = "https://www.googleapis.com/auth/drive.file";
+  const GOOGLE_CONFIGURED =
+    GOOGLE_CLIENT_ID && GOOGLE_API_KEY &&
+    !GOOGLE_CLIENT_ID.startsWith("PASTE_") && !GOOGLE_API_KEY.startsWith("PASTE_");
+
+  const toNum = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+
+  // ── .xlsx  ⇄  app state ─────────────────────────────────────────────────────
+
+  // Parse an .xlsx (ArrayBuffer) into the app's state shape.
+  function workbookToState(buf) {
+    const wb = XLSX.read(buf, { type: "array" });
+    const rows = (name) =>
+      wb.Sheets[name] ? XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: "" }) : [];
+
+    const settings = {};
+    rows("Settings").forEach((r) => { if (r.Key !== "" && r.Key != null) settings[r.Key] = r.Value; });
+
+    const incomePosts = rows("Income").map((r) => ({
+      id:       toNum(r.id),
+      name:     r.name == null ? "" : String(r.name),
+      type:     r.type === "per-unit" ? "per-unit" : "fixed",
+      amount:   toNum(r.amount),
+      quantity: toNum(r.quantity),
+    }));
+
+    const costPosts = rows("Costs").map((r) => ({
+      id:       toNum(r.id),
+      name:     r.name == null ? "" : String(r.name),
+      type:     r.type === "per-unit" ? "per-unit" : "fixed",
+      amount:   toNum(r.amount),
+      quantity: toNum(r.quantity),
+      linkedTo: (r.linkedTo === "" || r.linkedTo == null) ? null : toNum(r.linkedTo),
+    }));
+
+    const ids = incomePosts.concat(costPosts).map((p) => p.id).filter((n) => !isNaN(n));
+    const nextId = (ids.length ? Math.max.apply(null, ids) : 0) + 1;
+
+    return {
+      eventName:   settings.eventName == null ? "" : String(settings.eventName),
+      unitGoal:    toNum(settings.unitGoal),
+      revenueGoal: toNum(settings.revenueGoal),
+      incomePosts, costPosts, nextId,
+    };
+  }
+
+  // Serialize the app state into an .xlsx Blob: readable Income/Costs/Settings
+  // tabs plus a Summary tab so the file is meaningful even without the app.
+  function stateToWorkbookBlob(s) {
+    const wb = XLSX.utils.book_new();
+
+    const income = [["id", "name", "type", "amount", "quantity"]].concat(
+      s.incomePosts.map((p) => [p.id, p.name, p.type, p.amount, p.quantity])
+    );
+    const costs = [["id", "name", "type", "amount", "quantity", "linkedTo"]].concat(
+      s.costPosts.map((c) => [c.id, c.name, c.type, c.amount, c.quantity, c.linkedTo == null ? "" : c.linkedTo])
+    );
+    const settings = [
+      ["Key", "Value"],
+      ["eventName",   s.eventName],
+      ["unitGoal",    s.unitGoal],
+      ["revenueGoal", s.revenueGoal],
+      ["nextId",      s.nextId],
+      ["savedAt",     new Date().toISOString()],
+      ["appVersion",  APP_VERSION],
+    ];
+
+    // Computed totals as plain values, so a viewer sees the real numbers.
+    const m = s.summary || {};
+    const summary = [
+      ["Mått", "Värde (kr)"],
+      ["Totala intäkter",                m.totalRevenue],
+      ["  varav fasta",                  m.totalFixedIncome],
+      ["  varav per enhet",              m.totalUnitIncome],
+      ["Totala kostnader",               m.totalCosts],
+      ["  varav fasta",                  m.totalFixedCosts],
+      ["  varav per enhet",              m.totalUnitCosts],
+      ["Resultat",                       m.result],
+      ["Sålda enheter",                  m.totalUnitsSold],
+      ["Otäckta fasta kostnader",        m.uncoveredFixed],
+      ["Bidragsmarginal/enhet (snitt)",  m.weightedMargin],
+      ["Nollpunkt (enheter)",            m.breakEvenUnits],
+    ];
+
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(income),   "Income");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(costs),    "Costs");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(settings), "Settings");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary),  "Summary");
+
+    const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    return new Blob([out], { type: XLSX_MIME });
+  }
+
+  // ── Local files: File System Access API, with a download/upload fallback ─────
+
+  const HAS_FS = typeof window !== "undefined" && "showSaveFilePicker" in window;
+  const FS_TYPES = [{ description: "Excel-arbetsbok", accept: { [XLSX_MIME]: [".xlsx"] } }];
+
+  async function localOpen() {
+    if (HAS_FS) {
+      const [handle] = await window.showOpenFilePicker({ types: FS_TYPES, multiple: false });
+      const file = await handle.getFile();
+      return { handle, name: file.name, buf: await file.arrayBuffer() };
+    }
+    // Fallback (Firefox/Safari): hidden file input. Note: cancel fires no event.
+    return await new Promise((resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".xlsx";
+      input.onchange = async () => {
+        const file = input.files && input.files[0];
+        resolve(file ? { handle: null, name: file.name, buf: await file.arrayBuffer() } : null);
+      };
+      input.click();
+    });
+  }
+
+  async function localSave(blob, suggestedName, handle) {
+    if (HAS_FS) {
+      let h = handle;
+      if (!h) h = await window.showSaveFilePicker({ suggestedName, types: FS_TYPES });
+      const w = await h.createWritable();
+      await w.write(blob);
+      await w.close();
+      return { handle: h, name: (h.name || suggestedName) };
+    }
+    // Fallback: download a fresh copy each time.
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = suggestedName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return { handle: null, name: suggestedName };
+  }
+
+  // ── Google Drive: GIS token + Picker (open) + Drive REST v3 (read/write) ─────
+
+  let _tokenClient = null;
+  let _accessToken = null;
+
+  function getToken() {
+    return new Promise((resolve, reject) => {
+      if (!(window.google && google.accounts && google.accounts.oauth2))
+        return reject(new Error("Google-inloggning laddas fortfarande — försök igen om en sekund."));
+      if (!_tokenClient) {
+        _tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => {},
+        });
+      }
+      _tokenClient.callback = (resp) => {
+        if (resp && resp.error) return reject(new Error("Google-inloggning misslyckades: " + resp.error));
+        _accessToken = resp.access_token;
+        resolve(_accessToken);
+      };
+      _tokenClient.requestAccessToken({ prompt: "" });
+    });
+  }
+
+  async function driveRequest(url, opts) {
+    opts = opts || {};
+    const send = async () => {
+      const token = await getToken();
+      return fetch(url, Object.assign({}, opts, {
+        headers: Object.assign({}, opts.headers || {}, { Authorization: "Bearer " + token }),
+      }));
+    };
+    let r = await send();
+    if (r.status === 401) { _accessToken = null; r = await send(); }   // token expired → refresh once
+    if (!r.ok) throw new Error("Google Drive-fel " + r.status + ": " + (await r.text()).slice(0, 180));
+    return r;
+  }
+
+  async function driveDownload(fileId) {
+    const r = await driveRequest("https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media");
+    return await r.arrayBuffer();
+  }
+
+  async function driveSaveNew(blob, name) {
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify({ name, mimeType: XLSX_MIME })], { type: "application/json" }));
+    form.append("file", blob);
+    const r = await driveRequest(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name",
+      { method: "POST", body: form }
+    );
+    return await r.json();
+  }
+
+  async function driveSaveExisting(blob, fileId) {
+    const r = await driveRequest(
+      "https://www.googleapis.com/upload/drive/v3/files/" + fileId + "?uploadType=media&fields=id,name",
+      { method: "PATCH", body: blob }
+    );
+    return await r.json();
+  }
+
+  function ensurePicker() {
+    return new Promise((resolve, reject) => {
+      if (!window.gapi) return reject(new Error("Google API laddas fortfarande — försök igen."));
+      if (window.google && google.picker) return resolve();
+      gapi.load("picker", { callback: resolve, onerror: () => reject(new Error("Kunde inte ladda Google Picker.")) });
+    });
+  }
+
+  async function driveOpen() {
+    if (!GOOGLE_CONFIGURED)
+      throw new Error("Google Drive är inte konfigurerat ännu — lägg in Client ID och API-nyckel (se README).");
+    const token = await getToken();
+    await ensurePicker();
+    return await new Promise((resolve, reject) => {
+      try {
+        const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setMimeTypes(XLSX_MIME)
+          .setMode(google.picker.DocsViewMode.LIST);
+        const picker = new google.picker.PickerBuilder()
+          .setOAuthToken(token)
+          .setDeveloperKey(GOOGLE_API_KEY)
+          .addView(view)
+          .setTitle("Välj din budget (.xlsx)")
+          .setCallback((data) => {
+            const A = google.picker.Action;
+            if (data.action === A.PICKED) {
+              const doc = data.docs[0];
+              driveDownload(doc.id)
+                .then((buf) => resolve({ fileId: doc.id, name: doc.name, buf }))
+                .catch(reject);
+            } else if (data.action === A.CANCEL) {
+              resolve(null);
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      } catch (e) { reject(e); }
+    });
+  }
 
   // ── Reusable components ────────────────────────────────────────────────────
 
@@ -220,6 +505,15 @@
     //     - inherited from a per-unit income post when linkedTo = that post's id
     //     - set manually when linkedTo = null
     const [costPosts, setCostPosts] = useState([]);
+
+    // ── Persistence / open-file state ────────────────────────────────────────
+    const [currentFile, setCurrentFile] = useState(null);  // {provider,name,handle,fileId} | null
+    const [status,      setStatus]      = useState("idle"); // idle | opening | saving | error
+    const [errMsg,      setErrMsg]      = useState("");
+    const [dirty,       setDirty]       = useState(false);
+    const [savedAt,     setSavedAt]     = useState(null);
+    const [menu,        setMenu]        = useState(null);   // null | 'open' | 'saveas'
+    const skipDirty = useRef(true);                          // skip the first dirty-effect run / after a load
 
     // ── Derived calculations ─────────────────────────────────────────────────
 
@@ -351,10 +645,166 @@
       return perUnitIncome.some(p => p.id === cp.linkedTo) ? cp.linkedTo : null;
     };
 
+    // ── Open / Save (local file or Google Drive) ──────────────────────────────
+
+    // Everything we persist, including computed totals for the Summary tab.
+    const collectState = () => ({
+      eventName, unitGoal, revenueGoal, nextId, incomePosts, costPosts,
+      summary: {
+        totalRevenue, totalFixedIncome, totalUnitIncome,
+        totalCosts, totalFixedCosts, totalUnitCosts,
+        result, totalUnitsSold, uncoveredFixed, weightedMargin,
+        breakEvenUnits: breakEvenUnits == null ? "" : breakEvenUnits,
+      },
+    });
+
+    // Push a freshly-loaded workbook into state without tripping the dirty flag.
+    const applyState = (s) => {
+      skipDirty.current = true;
+      setEventName(s.eventName);
+      setUnitGoal(s.unitGoal);
+      setRevenueGoal(s.revenueGoal);
+      setIncomePosts(s.incomePosts);
+      setCostPosts(s.costPosts);
+      setNextId(s.nextId);
+      setDirty(false);
+    };
+
+    const fileBaseName = () =>
+      ((eventName || "budget").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_") || "budget") + ".xlsx";
+
+    const fail = (e) => { console.error(e); setErrMsg((e && e.message) ? e.message : String(e)); setStatus("error"); };
+    const cancelled = (e) => e && (e.name === "AbortError" || e.code === 20);
+
+    const doOpen = async (provider) => {
+      setMenu(null);
+      try {
+        setStatus("opening");
+        const res = provider === "local" ? await localOpen() : await driveOpen();
+        if (!res) { setStatus("idle"); return; }              // user cancelled the picker
+        applyState(workbookToState(res.buf));
+        setCurrentFile({ provider, name: res.name, handle: res.handle || null, fileId: res.fileId || null });
+        setSavedAt(null);
+        setStatus("idle");
+      } catch (e) { if (cancelled(e)) setStatus("idle"); else fail(e); }
+    };
+
+    const doSave = async (override) => {
+      setMenu(null);
+      const provider = override || (currentFile && currentFile.provider);
+      if (!provider) { setMenu("saveas"); return; }            // nothing open yet → ask where
+      try {
+        if (provider === "drive" && !GOOGLE_CONFIGURED)
+          throw new Error("Google Drive är inte konfigurerat ännu — se README.");
+        setStatus("saving");
+        const blob = stateToWorkbookBlob(collectState());
+        const name = (!override && currentFile && currentFile.name) ? currentFile.name : fileBaseName();
+        if (provider === "local") {
+          const reuse = (!override && currentFile && currentFile.provider === "local") ? currentFile.handle : null;
+          const r = await localSave(blob, name, reuse);
+          setCurrentFile({ provider: "local", name: r.name, handle: r.handle, fileId: null });
+        } else {
+          const reuseId = (!override && currentFile && currentFile.provider === "drive") ? currentFile.fileId : null;
+          const r = reuseId ? await driveSaveExisting(blob, reuseId) : await driveSaveNew(blob, name);
+          setCurrentFile({ provider: "drive", name: (r.name || name), handle: null, fileId: (r.id || reuseId) });
+        }
+        setDirty(false);
+        setSavedAt(new Date());
+        setStatus("idle");
+      } catch (e) { if (cancelled(e)) setStatus("idle"); else fail(e); }
+    };
+
+    const onSaveClick = () => {
+      if (currentFile) doSave();
+      else setMenu(menu === "saveas" ? null : "saveas");
+    };
+
+    const onNew = () => {
+      setMenu(null);
+      if (dirty && !window.confirm("Du har osparade ändringar. Skapa en ny budget ändå?")) return;
+      applyState({ eventName: "", unitGoal: 0, revenueGoal: 0, incomePosts: [], costPosts: [], nextId: 1 });
+      setCurrentFile(null);
+      setSavedAt(null);
+      setStatus("idle");
+    };
+
+    // Mark unsaved whenever the budget changes (skipped right after a load / new).
+    useEffect(() => {
+      if (skipDirty.current) { skipDirty.current = false; return; }
+      setDirty(true);
+    }, [incomePosts, costPosts, eventName, unitGoal, revenueGoal]);
+
+    // Warn before leaving with unsaved changes.
+    useEffect(() => {
+      const h = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } };
+      window.addEventListener("beforeunload", h);
+      return () => window.removeEventListener("beforeunload", h);
+    }, [dirty]);
+
+    // Close the toolbar dropdown when clicking elsewhere.
+    useEffect(() => {
+      if (!menu) return;
+      const close = () => setMenu(null);
+      const id = setTimeout(() => document.addEventListener("click", close), 0);
+      return () => { clearTimeout(id); document.removeEventListener("click", close); };
+    }, [menu]);
+
+    // ── Status pill ───────────────────────────────────────────────────────────
+    const providerLabel = currentFile ? (currentFile.provider === "drive" ? "Google Drive" : "Den här datorn") : null;
+    let statusText, statusClass;
+    if (status === "opening")      { statusText = "Öppnar…";        statusClass = "busy"; }
+    else if (status === "saving")  { statusText = "Sparar…";        statusClass = "busy"; }
+    else if (status === "error")   { statusText = "⚠ " + errMsg;    statusClass = "err";  }
+    else if (currentFile) {
+      const tail = dirty ? "● Osparade ändringar"
+                 : savedAt ? "Sparad " + savedAt.toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" })
+                 : "Öppnad";
+      statusText = currentFile.name + " · " + providerLabel + " · " + tail;
+      statusClass = dirty ? "dirty" : "ok";
+    } else {
+      statusText = dirty ? "● Osparad ny budget" : "Ingen fil öppen";
+      statusClass = dirty ? "dirty" : "idle";
+    }
+
     // ── Render ────────────────────────────────────────────────────────────────
 
     return (
       <div className="app">
+
+        {/* ── Toolbar: open/save the .xlsx on this computer or in Google Drive ─ */}
+        <div className="toolbar">
+          <div className="toolbar-actions">
+            <div className="menu-wrap">
+              <button onClick={(e) => { e.stopPropagation(); setMenu(menu === "open" ? null : "open"); }}>
+                📂 Öppna ▾
+              </button>
+              {menu === "open" && (
+                <div className="menu">
+                  <button onClick={() => doOpen("local")}>Från den här datorn</button>
+                  <button onClick={() => doOpen("drive")}>Från Google Drive</button>
+                </div>
+              )}
+            </div>
+
+            <button onClick={onSaveClick} title="Spara till den öppna filen">💾 Spara</button>
+
+            <div className="menu-wrap">
+              <button onClick={(e) => { e.stopPropagation(); setMenu(menu === "saveas" ? null : "saveas"); }}>
+                Spara som ▾
+              </button>
+              {menu === "saveas" && (
+                <div className="menu">
+                  <button onClick={() => doSave("local")}>Till den här datorn</button>
+                  <button onClick={() => doSave("drive")}>Till Google Drive</button>
+                </div>
+              )}
+            </div>
+
+            <button onClick={onNew} title="Börja om med en tom budget">✨ Ny</button>
+          </div>
+
+          <div className={"status-pill " + statusClass} title={statusText}>{statusText}</div>
+        </div>
 
         {/* ── Help banner ────────────────────────────────────────────────── */}
         <div className="help">
