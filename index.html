@@ -186,6 +186,24 @@
     .status-pill.busy  { background: #e8f0fe; color: #185FA5; }
     .status-pill.err   { background: #fbeae5; color: #993C1D; }
     .status-pill.idle  { background: #f0f2f5; color: #888;    }
+
+    /* ── Multi-link picker (tie a per-unit cost to several income posts) ──── */
+    .link-btn {
+      border: 1px solid #d0d0d0; border-radius: 5px; background: #fff; color: #1a1a1a;
+      font-size: 12px; font-family: inherit; padding: 4px 8px; cursor: pointer;
+      max-width: 130px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;
+    }
+    .link-btn:hover { background: #f5f7ff; border-color: #185FA5; }
+    .link-menu { left: auto; right: 0; min-width: 210px; max-height: 240px; overflow-y: auto; padding: 4px; }
+    .link-item {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+      font-size: 12px; border-radius: 5px; cursor: pointer;
+    }
+    .link-item:hover { background: #f0f4ff; }
+    .link-item input { flex-shrink: 0; cursor: pointer; }
+    .link-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-qty  { color: #999; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+    .link-empty { padding: 8px 10px; font-size: 12px; color: #aaa; }
   </style>
 </head>
 <body>
@@ -223,6 +241,15 @@
 
   const toNum = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
 
+  // Normalize a cost's `linkedTo` to an array of income-post ids.
+  // Accepts: array, single number, "" / null (manual), or "1;3" / "1,3" strings.
+  const normLinked = (v) => {
+    if (Array.isArray(v)) return v.map(toNum).filter((n) => !isNaN(n));
+    if (v === "" || v == null) return [];
+    if (typeof v === "number") return [v];
+    return String(v).split(/[;,]/).map((s) => s.trim()).filter(Boolean).map(toNum).filter((n) => !isNaN(n));
+  };
+
   // ── .xlsx  ⇄  app state ─────────────────────────────────────────────────────
 
   // Parse an .xlsx (ArrayBuffer) into the app's state shape.
@@ -248,7 +275,7 @@
       type:     r.type === "per-unit" ? "per-unit" : "fixed",
       amount:   toNum(r.amount),
       quantity: toNum(r.quantity),
-      linkedTo: (r.linkedTo === "" || r.linkedTo == null) ? null : toNum(r.linkedTo),
+      linkedTo: normLinked(r.linkedTo),
     }));
 
     const ids = incomePosts.concat(costPosts).map((p) => p.id).filter((n) => !isNaN(n));
@@ -272,7 +299,7 @@
       s.incomePosts.map((p) => [p.id, p.name, p.type, p.amount, p.quantity])
     );
     const costs = [["id", "name", "type", "amount", "quantity", "linkedTo"]].concat(
-      s.costPosts.map((c) => [c.id, c.name, c.type, c.amount, c.quantity, c.linkedTo == null ? "" : c.linkedTo])
+      s.costPosts.map((c) => [c.id, c.name, c.type, c.amount, c.quantity, (c.linkedTo && c.linkedTo.length) ? c.linkedTo.join(";") : ""])
     );
     const settings = [
       ["Key", "Value"],
@@ -517,6 +544,7 @@
     const [dirty,       setDirty]       = useState(false);
     const [savedAt,     setSavedAt]     = useState(null);
     const [menu,        setMenu]        = useState(null);   // null | 'open' | 'saveas'
+    const [linkMenu,    setLinkMenu]    = useState(null);   // cost id whose link-picker is open
     const [hydrated,    setHydrated]    = useState(false);  // browser draft restored yet?
     const skipDirty = useRef(true);                          // skip the dirty-effect run after a load / restore
 
@@ -536,10 +564,16 @@
 
     // Resolve the effective quantity for a per-unit cost post.
     // If linkedTo is set, inherit the linked income post's current quantity.
+    // A per-unit cost can be linked to several per-unit income posts; its effective
+    // quantity is the SUM of those posts' quantities (e.g. chairs across all ticket
+    // types). With no links it falls back to its own manual quantity.
     const effectiveQty = (cp) => {
-      if (cp.linkedTo) {
-        const src = incomePosts.find(p => p.id === cp.linkedTo && p.type === "per-unit");
-        return src ? (src.quantity || 0) : 0;
+      const ids = cp.linkedTo || [];
+      if (ids.length > 0) {
+        return ids.reduce((sum, id) => {
+          const src = incomePosts.find(p => p.id === id && p.type === "per-unit");
+          return sum + (src ? (src.quantity || 0) : 0);
+        }, 0);
       }
       return cp.quantity || 0;
     };
@@ -561,7 +595,7 @@
     // Standalone per-unit costs (not linked to any income post) have a fixed manual
     // quantity, so they don't scale with sales — treat them as fixed for break-even.
     const standaloneCosts = costPosts
-      .filter(p => p.type === "per-unit" && !p.linkedTo)
+      .filter(p => p.type === "per-unit" && (!p.linkedTo || p.linkedTo.length === 0))
       .reduce((s, p) => s + (p.amount || 0) * (p.quantity || 0), 0);
 
     // The amount that per-unit sales must cover after fixed income and standalone costs
@@ -571,7 +605,7 @@
     // posts that are linked to it. This is the contribution margin per unit.
     const varCostFor = (incomeId) =>
       costPosts
-        .filter(p => p.type === "per-unit" && p.linkedTo === incomeId)
+        .filter(p => p.type === "per-unit" && (p.linkedTo || []).includes(incomeId))
         .reduce((s, p) => s + (p.amount || 0), 0);
 
     const margins = perUnitIncome.map(p => ({
@@ -618,8 +652,8 @@
 
     const delIncome = (id) => {
       setIncomePosts(ps => ps.filter(p => p.id !== id));
-      // Unlink any cost posts that referenced the deleted income post
-      setCostPosts(cs => cs.map(c => c.linkedTo === id ? { ...c, linkedTo: null } : c));
+      // Drop the deleted income post from any cost's link list
+      setCostPosts(cs => cs.map(c => ({ ...c, linkedTo: (c.linkedTo || []).filter(x => x !== id) })));
     };
 
     const addIncome = () => {
@@ -630,26 +664,42 @@
     const updCost = (id, field, val) =>
       setCostPosts(cs => cs.map(c => {
         if (c.id !== id) return c;
-        let coerced = NUM.has(field) ? parseFloat(val) || 0
-                    : field === "linkedTo" ? (+val || null)   // "" → 0 → null
-                    : val;
-        const updated = { ...c, [field]: coerced };
-        // Clear the link when switching a cost post back to fixed type
-        if (field === "type" && val === "fixed") updated.linkedTo = null;
+        const updated = { ...c, [field]: NUM.has(field) ? parseFloat(val) || 0 : val };
+        // Clear all links when switching a cost post back to fixed type
+        if (field === "type" && val === "fixed") updated.linkedTo = [];
         return updated;
+      }));
+
+    // Toggle one income post in a per-unit cost's link list.
+    const toggleCostLink = (costId, incomeId) =>
+      setCostPosts(cs => cs.map(c => {
+        if (c.id !== costId) return c;
+        const ids = c.linkedTo || [];
+        return { ...c, linkedTo: ids.includes(incomeId) ? ids.filter(x => x !== incomeId) : [...ids, incomeId] };
       }));
 
     const delCost = (id) => setCostPosts(cs => cs.filter(c => c.id !== id));
 
     const addCost = () => {
-      setCostPosts(cs => [...cs, { id: nextId, name: "", type: "fixed", amount: 0, quantity: 0, linkedTo: null }]);
+      setCostPosts(cs => [...cs, { id: nextId, name: "", type: "fixed", amount: 0, quantity: 0, linkedTo: [] }]);
       setNextId(n => n + 1);
     };
 
-    // Resolve linkedTo for rendering: guard against stale ids after an income post is deleted
-    const resolveLink = (cp) => {
-      if (!cp.linkedTo) return null;
-      return perUnitIncome.some(p => p.id === cp.linkedTo) ? cp.linkedTo : null;
+    // Valid linked ids for rendering (guard against stale ids after a delete).
+    const resolveLinks = (cp) => (cp.linkedTo || []).filter(id => perUnitIncome.some(p => p.id === id));
+
+    // ── Keyboard: Enter adds a new post and focuses it (Excel-like) ───────────
+    const focusLastRow = () => setTimeout(() => {
+      const names = document.querySelectorAll(".post-row .post-name");
+      const last = names[names.length - 1];
+      if (last) { last.focus(); if (last.select) last.select(); }
+    }, 30);
+    const onRowKeyDown = (e, addFn) => {
+      if (e.key === "Enter" && e.target.tagName === "INPUT" && ["text", "number"].includes(e.target.type)) {
+        e.preventDefault();
+        addFn();
+        focusLastRow();
+      }
     };
 
     // ── Open / Save (local file or Google Drive) ──────────────────────────────
@@ -754,7 +804,7 @@
           setRevenueGoal(d.revenueGoal || 0);
           setSliderMaxSetting(d.sliderMaxSetting || 0);
           setIncomePosts(Array.isArray(d.incomePosts) ? d.incomePosts : []);
-          setCostPosts(Array.isArray(d.costPosts) ? d.costPosts : []);
+          setCostPosts((Array.isArray(d.costPosts) ? d.costPosts : []).map(c => ({ ...c, linkedTo: normLinked(c.linkedTo) })));
           setNextId(d.nextId || 1);
           setCurrentFile(d.currentFile || null);
           setSavedAt(d.savedAt ? new Date(d.savedAt) : null);
@@ -787,13 +837,13 @@
       setDirty(true);
     }, [hydrated, incomePosts, costPosts, eventName, unitGoal, revenueGoal, sliderMaxSetting]);
 
-    // Close the toolbar dropdown when clicking elsewhere.
+    // Close any open dropdown (toolbar or link-picker) when clicking elsewhere.
     useEffect(() => {
-      if (!menu) return;
-      const close = () => setMenu(null);
+      if (!menu && linkMenu === null) return;
+      const close = () => { setMenu(null); setLinkMenu(null); };
       const id = setTimeout(() => document.addEventListener("click", close), 0);
       return () => { clearTimeout(id); document.removeEventListener("click", close); };
-    }, [menu]);
+    }, [menu, linkMenu]);
 
     // ── Status pill ───────────────────────────────────────────────────────────
     const providerLabel = currentFile ? (currentFile.provider === "drive" ? "Google Drive" : "Den här datorn") : null;
@@ -901,7 +951,7 @@
             )}
 
             {incomePosts.map(p => (
-              <div key={p.id} className="post-row">
+              <div key={p.id} className="post-row" onKeyDown={e => onRowKeyDown(e, addIncome)}>
                 <input
                   className="post-name"
                   value={p.name}
@@ -924,6 +974,7 @@
                     <span style={{ fontSize: 13, color: "#999", flexShrink: 0 }}>×</span>
                     <input
                       type="range" min={0} max={sliderMax} step={1}
+                      tabIndex={-1}
                       value={p.quantity}
                       onChange={e => updIncome(p.id, "quantity", e.target.value)}
                     />
@@ -975,9 +1026,9 @@
             )}
 
             {costPosts.map(c => {
-              const link = resolveLink(c);
+              const links = resolveLinks(c);
               return (
-                <div key={c.id} className="post-row">
+                <div key={c.id} className="post-row" onKeyDown={e => onRowKeyDown(e, addCost)}>
                   <input
                     className="post-name"
                     value={c.name}
@@ -994,26 +1045,49 @@
                     title={c.type === "per-unit" ? "Kostnad per enhet (kr)" : "Fast belopp (kr)"}
                   />
 
-                  {/* Per-unit: link to an income post, or set quantity manually */}
+                  {/* Per-unit: link to one or MORE income posts (quantity = their sum), or set manually */}
                   {c.type === "per-unit" && (
                     <>
                       <span style={{ fontSize: 13, color: "#999", flexShrink: 0 }}>×</span>
 
-                      {/* Dropdown: "Manuellt" or any per-unit income post */}
-                      <select
-                        value={link ?? ""}
-                        onChange={e => updCost(c.id, "linkedTo", e.target.value)}
-                        title="Koppla till en intäktspost för att följa dess antal, eller ange manuellt"
-                      >
-                        <option value="">Manuellt</option>
-                        {perUnitIncome.map(ip => (
-                          <option key={ip.id} value={ip.id}>{ip.name || `Post #${ip.id}`}</option>
-                        ))}
-                      </select>
+                      {/* Multi-select: tie this cost to any number of per-unit income posts */}
+                      <div className="menu-wrap" onClick={e => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="link-btn"
+                          title="Koppla kostnaden till en eller flera intäktsposter (antalet summeras), eller ange manuellt"
+                          onClick={() => setLinkMenu(linkMenu === c.id ? null : c.id)}
+                        >
+                          {links.length === 0
+                            ? "Manuellt ▾"
+                            : `${links.length} kopplad${links.length > 1 ? "e" : ""} ▾`}
+                        </button>
+                        {linkMenu === c.id && (
+                          <div className="menu link-menu">
+                            {perUnitIncome.length === 0 && (
+                              <div className="link-empty">Inga per-enhet-intäkter att koppla ännu.</div>
+                            )}
+                            {perUnitIncome.map(ip => (
+                              <label key={ip.id} className="link-item">
+                                <input
+                                  type="checkbox"
+                                  checked={links.includes(ip.id)}
+                                  onChange={() => toggleCostLink(c.id, ip.id)}
+                                />
+                                <span className="link-name">{ip.name || `Post #${ip.id}`}</span>
+                                <span className="link-qty">{ip.quantity || 0} st</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
 
-                      {/* When linked, show the inherited quantity as read-only text */}
-                      {link ? (
-                        <span style={{ fontSize: 12, color: "#555", minWidth: 58, textAlign: "center", flexShrink: 0 }}>
+                      {/* Linked → summed quantity (read-only); manual → number input */}
+                      {links.length > 0 ? (
+                        <span
+                          style={{ fontSize: 12, color: "#555", minWidth: 58, textAlign: "center", flexShrink: 0 }}
+                          title={"Summa av: " + links.map(id => { const ip = perUnitIncome.find(p => p.id === id); return (ip && ip.name) || ("#" + id); }).join(", ")}
+                        >
                           {effectiveQty(c)} st
                         </span>
                       ) : (
